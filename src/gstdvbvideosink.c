@@ -103,16 +103,16 @@ static unsigned long bitstream_get(struct bitstream *bit, int bits)
 	while (bits)
 	{
 		unsigned int d=bits;
-		if (!bit->avail) {
-			bit->last = *bit->data++;
-			bit->avail = 8;
-		}
 		if (d > bit->avail)
 			d=bit->avail;
 		res<<=d;
 		res|=(bit->last>>(bit->avail-d))&~(-1<<d);
 		bit->avail-=d;
 		bits-=d;
+		if (!bit->avail) {
+			bit->last = *bit->data++;
+			bit->avail = 8;
+		}
 	}
 	return res;
 }
@@ -137,7 +137,7 @@ static unsigned int Vc1ParseEntryPointHeader( GstDVBVideoSink *self, struct bits
 static unsigned char Vc1GetFrameType( GstDVBVideoSink *self, struct bitstream *bit );
 static unsigned char Vc1GetBFractionVal( GstDVBVideoSink *self, struct bitstream *bit );
 static unsigned char Vc1GetNrOfFramesFromBFractionVal( unsigned char ucBFVal );
-static unsigned char Vc1HandleStreamBuffer( GstDVBVideoSink *self, unsigned char *data, int flags );
+static unsigned char Vc1HandleStreamBuffer( GstDVBVideoSink *self, unsigned char *data, unsigned int data_len, int flags );
 
 #define cVC1NoBufferDataAvailable	0
 #define cVC1BufferDataAvailable		1
@@ -1058,7 +1058,7 @@ gst_dvbvideosink_render (GstBaseSink * sink, GstBuffer * buffer)
 				self->no_header = skip_header_check;
 
 				if (self->codec_type == CT_VC1) {
-					unsigned char ucRetVal = Vc1HandleStreamBuffer( self, data, skip_header_check );
+					unsigned char ucRetVal = Vc1HandleStreamBuffer( self, data, data_len, skip_header_check );
 					if ( ucRetVal != cVC1NoBufferDataAvailable ) {
 						data_len = GST_BUFFER_SIZE(self->prev_frame);
 						data = GST_BUFFER_DATA(self->prev_frame);
@@ -1621,7 +1621,7 @@ gst_dvbvideosink_set_caps (GstBaseSink * basesink, GstCaps * caps)
 					self->codec_data = gst_value_get_buffer (codec_data);
 					gst_buffer_ref (self->codec_data);
 
-					Vc1HandleStreamBuffer( self, GST_BUFFER_DATA(self->codec_data)+1, 2 );
+					Vc1HandleStreamBuffer( self, GST_BUFFER_DATA(self->codec_data)+1, GST_BUFFER_SIZE(self->codec_data)-1, 2);
 				}
 			}
 			else
@@ -2272,57 +2272,49 @@ Vc1GetNrOfFramesFromBFractionVal( unsigned char ucBFVal )
 }
 
 static unsigned char
-Vc1HandleStreamBuffer( GstDVBVideoSink *self, unsigned char *data, int flags )
+Vc1HandleStreamBuffer( GstDVBVideoSink *self, unsigned char *data, unsigned int data_len, int flags )
 {
 	unsigned char ucPType, ucRetVal = cVC1BufferDataAvailable;
-	unsigned int i = -1;
+	unsigned int i = 0;
 
 	if (flags & 1)
 		goto parse_frame_header;
 
-	i = 0;
-
-	if ( ((data[i] == 0) && (data[i+1] == 0) && (data[i+2] == 1)) ) {
-
+	while ( ((data[i] == 0) && (data[i+1] == 0) && (data[i+2] == 1)) ) {
 		i += 3;
 
 		if ( data[i] == 0x0F ) {
 			// Sequence header
 			struct bitstream bitstr;
 			i++;
+
+			GST_DEBUG_OBJECT(self, "Seq Header at POS %d", i);
+
 			bitstream_init( &bitstr, &data[i], 0 );
 			i += Vc1ParseSeqHeader(self, &bitstr);
 			//printf("Sequence header\n");
-
-			if ( data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 && data[i+3] == 0x0E ) {
-				// Entry Point Header
-				struct bitstream bitstr;
-				i += 4;
-				bitstream_init( &bitstr, &data[i], 0 );
-				i += Vc1ParseEntryPointHeader(self, &bitstr);
-				//printf("Entry Point header\n");
-
-				if ( flags & 2 ) // parse codec_data only
-					return 0;
-
-				if ( data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 && data[i+3] == 0x0D )
-					i += 3;
-				else
-					GST_ERROR_OBJECT(self, "No Frame Header after a VC1 Entry Point header!!!");
-			}
-			else
-				GST_ERROR_OBJECT(self, "No Entry Point Header after a VC1 Sequence header!!!");
 		}
+		else if (data[i] == 0x0E ) {
+			// Entry Point Header
+			struct bitstream bitstr;
+			i++;
 
-		if ( data[i] == 0x0D )
-parse_frame_header:
+			GST_DEBUG_OBJECT(self, "Entry Point Header at POS %d", i);
+
+			bitstream_init( &bitstr, &data[i], 0 );
+			i += Vc1ParseEntryPointHeader(self, &bitstr);
+			//printf("Entry Point header\n");
+			if ( flags & 2 ) // parse codec_data only
+				return 0;
+		}
+		else if ( data[i] == 0x0D )
 		{
 			// Frame Header
 			struct bitstream bitstr;
 			unsigned char ucBFractionVal = 0;
-
 			i++;
-
+parse_frame_header:
+			GST_DEBUG_OBJECT(self, "Frame Header at POS %d", i);
 			bitstream_init( &bitstr, &data[i], 0 );
 			ucPType = Vc1GetFrameType( self, &bitstr );
 
@@ -2355,10 +2347,9 @@ parse_frame_header:
 			}
 			// save the current picture type
 			self->ucPrevFramePicType = ucPType;
+			break;
 		}
 	}
-	else
-		GST_ERROR_OBJECT(self, "startcodes in VC1 buffer not correctly aligned!");
 
 	return ucRetVal;
 }
